@@ -1,177 +1,226 @@
-from flask import Flask, jsonify, request
+import os
+from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from flask_cors import CORS
-from flasgger import Swagger
-import os
-import hashlib
-import json
-import time
+from flasgger import Swagger, swag_from
 
-app = Flask(__name__, instance_relative_config=True)
+app = Flask(__name__)
 
-# ==========================================
-# CONFIGURACIÓN DE CORS Y SWAGGER
-# ==========================================
-CORS(app)
-swagger = Swagger(app, template={
-    "info": {
-        "title": "API de Productos y Estudiantes",
-        "description": "API REST con integración a SQLite, sistema de caché y CORS.",
-        "version": "1.0.0"
-    }
-})
-
-# ==========================================
-# CONFIGURACIÓN DE BASE DE DATOS
-# ==========================================
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(app.instance_path, 'datos.db')
+# Configuración de Base de Datos (usando instance/datos.db)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///datos.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-os.makedirs(app.instance_path, exist_ok=True)
-
 db = SQLAlchemy(app)
 
-# ==========================================
-# SESIÓN 8: SISTEMA DE CACHÉ (Cache-Aside)
-# ==========================================
-cache_store = {}
-CACHE_TTL = 60
+# 1. CONFIGURACIÓN DE CORS (Lista Blanca + Preflight)
+origenes_permitidos = os.getenv(
+    "CORS_ORIGINS", 
+    "http://localhost:5000,http://127.0.0.1:5500"
+).split(",")
 
-def obtener_de_cache(key):
-    if key in cache_store:
-        entrada = cache_store[key]
-        if time.time() < entrada['expires']:
-            return entrada['data'], entrada['etag']
-        else:
-            del cache_store[key]
-    return None, None
+CORS(
+    app,
+    resources={r"/api/*": {"origins": origenes_permitidos}},
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    max_age=600
+)
 
-def guardar_en_cache(key, data):
-    etag = hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
-    cache_store[key] = {
-        'data': data,
-        'etag': etag,
-        'expires': time.time() + CACHE_TTL
+# 2. CONFIGURACIÓN DE SWAGGER / OPENAPI 3.0.3
+swagger_config = {
+    "headers": [],
+    "openapi": "3.0.3",
+    "specs": [
+        {
+            "endpoint": 'openapi',
+            "route": '/openapi.json',
+            "rule_filter": lambda rule: True,
+            "model_filter": lambda tag: True,
+        }
+    ],
+    "static_url_path": "/flasgger_static",
+    "swagger_ui": True,
+    "specs_route": "/docs"
+}
+
+swagger_template = {
+    "openapi": "3.0.3",
+    "info": {
+        "title": "API de Tareas - Proyecto Web",
+        "version": "1.0.0",
+        "description": "API REST documentada con OpenAPI 3.0.3 y protegida con CORS"
+    },
+    "servers": [
+        {"url": "http://localhost:3000", "description": "Servidor de Desarrollo"}
+    ],
+    "components": {
+        "schemas": {
+            "Tarea": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer", "example": 1},
+                    "titulo": {"type": "string", "example": "Implementar CORS en Flask"},
+                    "hecha": {"type": "boolean", "example": False}
+                }
+            },
+            "NuevaTarea": {
+                "type": "object",
+                "required": ["titulo"],
+                "properties": {
+                    "titulo": {"type": "string", "example": "Probar Swagger UI"}
+                }
+            }
+        }
     }
-    return etag
+}
 
-def invalidar_cache(key):
-    if key in cache_store:
-        del cache_store[key]
+swagger = Swagger(app, config=swagger_config, template=swagger_template)
 
-# ==========================================
-# MODELOS
-# ==========================================
-class Producto(db.Model):
+# --- MODELO DE BASE DE DATOS ---
+class Tarea(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    nombre = db.Column(db.String(80), nullable=False)
-    precio = db.Column(db.Float, nullable=False)
+    titulo = db.Column(db.String(150), nullable=False)
+    hecha = db.Column(db.Boolean, default=False)
 
-class Estudiante(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    nombre = db.Column(db.String(80), nullable=False)
-    apellido = db.Column(db.String(80), nullable=False)
-    edad = db.Column(db.Integer, nullable=False)
+    def to_dict(self):
+        return {"id": self.id, "titulo": self.titulo, "hecha": self.hecha}
 
-# ==========================================
-# RUTAS DE PRODUCTOS (CRUD)
-# ==========================================
-@app.route("/api/productos", methods=["GET"])
-def listar_productos():
-    """
-    Obtener lista de productos
-    Retorna todos los productos directamente desde la base de datos (con soporte de caché).
-    ---
-    tags:
-      - Productos
-    responses:
-      200:
-        description: Lista obtenida exitosamente
-    """
-    cache_key = "productos_lista"
-    if_none_match = request.headers.get('If-None-Match')
-    datos_cache, etag = obtener_de_cache(cache_key)
-    
-    if if_none_match and if_none_match == etag:
-        return '', 304
-    
-    if datos_cache:
-        respuesta = jsonify(datos_cache)
-        respuesta.headers['X-Cache-Status'] = 'HIT'
-    else:
-        productos = Producto.query.all()
-        data = [{"id": p.id, "nombre": p.nombre, "precio": p.precio} for p in productos]
-        etag = guardar_en_cache(cache_key, data)
-        respuesta = jsonify(data)
-        respuesta.headers['X-Cache-Status'] = 'MISS'
-    
-    respuesta.headers['Cache-Control'] = f'public, max-age={CACHE_TTL}'
-    respuesta.headers['ETag'] = etag
-    return respuesta
-
-@app.route("/api/productos", methods=["POST"])
-def crear_producto():
-    """
-    Crear un nuevo producto
-    Guarda un nuevo producto en la base de datos SQLite.
-    ---
-    tags:
-      - Productos
-    parameters:
-      - name: body
-        in: body
-        required: true
-        schema:
-          type: object
-          properties:
-            nombre:
-              type: string
-              example: "Disco Duro NVMe"
-            precio:
-              type: number
-              example: 120.50
-    responses:
-      201:
-        description: Producto creado
-    """
-    data = request.get_json()
-    if not data or 'nombre' not in data or 'precio' not in data:
-        return jsonify({"error": "Faltan datos obligatorios"}), 400
-
-    nuevo = Producto(nombre=data['nombre'], precio=data['precio'])
-    db.session.add(nuevo)
-    db.session.commit()
-    
-    invalidar_cache("productos_lista")
-    return jsonify({"id": nuevo.id, "nombre": nuevo.nombre, "precio": nuevo.precio}), 201
-
-# ==========================================
-# RUTAS DE ESTUDIANTES
-# ==========================================
-@app.route("/api/estudiantes", methods=["GET"])
-def listar_estudiantes():
-    """
-    Obtener lista de estudiantes
-    Retorna todos los estudiantes desde la base de datos.
-    ---
-    tags:
-      - Estudiantes
-    responses:
-      200:
-        description: Lista de estudiantes obtenida
-    """
-    estudiantes = Estudiante.query.all()
-    data = [{"id": e.id, "nombre": e.nombre, "apellido": e.apellido, "edad": e.edad} for e in estudiantes]
-    return jsonify(data), 200
-
-# ==========================================
-# INICIALIZACIÓN
-# ==========================================
 with app.app_context():
     db.create_all()
-    # Datos semilla si la tabla está vacía
-    if Producto.query.count() == 0:
-        db.session.add(Producto(nombre="Teclado Mecánico", precio=75.0))
+    if Tarea.query.count() <= 1:
+        tareas_iniciales = [
+            Tarea(titulo="Configurar lista blanca de orígenes en Flask-CORS", hecha=True),
+            Tarea(titulo="Documentar contratos y esquemas con OpenAPI 3.0.3", hecha=True),
+            Tarea(titulo="Inspeccionar petición preflight OPTIONS en DevTools (F12)", hecha=False),
+            Tarea(titulo="Validar bloqueo de origen no autorizado en puerto 5001", hecha=False),
+            Tarea(titulo="Ejecutar pruebas de contrato automatizadas en Cypress", hecha=False),
+        ]
+        db.session.bulk_save_objects(tareas_iniciales)
         db.session.commit()
 
-if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+# --- ESPECIFICACIONES SWAGGER EN PYTHON PURO ---
+spec_listar = {
+    "tags": ["Tareas"],
+    "summary": "Listar todas las tareas",
+    "responses": {
+        "200": {
+            "description": "Lista de tareas obtenida con éxito",
+            "content": {
+                "application/json": {
+                    "schema": {"type": "array", "items": {"$ref": "#/components/schemas/Tarea"}}
+                }
+            }
+        }
+    }
+}
+
+spec_crear = {
+    "tags": ["Tareas"],
+    "summary": "Crear una nueva tarea (Dispara Preflight OPTIONS)",
+    "requestBody": {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "#/components/schemas/NuevaTarea"}
+            }
+        }
+    },
+    "responses": {
+        "201": {
+            "description": "Tarea creada exitosamente",
+            "content": {
+                "application/json": {
+                    "schema": {"$ref": "#/components/schemas/Tarea"}
+                }
+            }
+        },
+        "400": {"description": "Error de validación (título vacío o faltante)"}
+    }
+}
+
+spec_eliminar = {
+    "tags": ["Tareas"],
+    "summary": "Eliminar una tarea por ID",
+    "parameters": [
+        {"name": "id", "in": "path", "required": True, "schema": {"type": "integer"}}
+    ],
+    "responses": {
+        "200": {"description": "Tarea eliminada"},
+        "404": {"description": "Tarea no encontrada"}
+    }
+}
+
+spec_db = {
+    "tags": ["Base de Datos"],
+    "summary": "Inspeccionar todas las tablas, columnas y registros de SQLite",
+    "responses": {
+        "200": {"description": "Información completa de todas las tablas y registros en SQLite"}
+    }
+}
+
+# --- ENDPOINTS DE LA API ---
+
+@app.route('/api/tareas', methods=['GET'])
+@swag_from(spec_listar)
+def listar_tareas():
+    tareas = Tarea.query.all()
+    return jsonify([t.to_dict() for t in tareas]), 200
+
+
+@app.route('/api/tareas', methods=['POST'])
+@swag_from(spec_crear)
+def crear_tarea():
+    datos = request.get_json(silent=True) or {}
+    titulo = datos.get('titulo', '').strip()
+    
+    if not titulo:
+        return jsonify({"error": "El campo 'titulo' es obligatorio"}), 400
+        
+    nueva = Tarea(titulo=titulo)
+    db.session.add(nueva)
+    db.session.commit()
+    return jsonify(nueva.to_dict()), 201
+
+
+@app.route('/api/tareas/<int:id>', methods=['DELETE'])
+@swag_from(spec_eliminar)
+def eliminar_tarea(id):
+    tarea = db.session.get(Tarea, id)
+    if not tarea:
+        return jsonify({"error": "Tarea no encontrada"}), 404
+        
+    db.session.delete(tarea)
+    db.session.commit()
+    return jsonify({"mensaje": "Tarea eliminada correctamente"}), 200
+
+
+@app.route('/api/db-info', methods=['GET'])
+@swag_from(spec_db)
+def info_base_datos():
+    inspector = db.inspect(db.engine)
+    tablas_nombres = inspector.get_table_names()
+    tablas_completas = {}
+
+    for tabla in tablas_nombres:
+        columnas = [
+            {"nombre": c["name"], "tipo": str(c["type"]), "pk": bool(c.get("primary_key"))}
+            for c in inspector.get_columns(tabla)
+        ]
+        resultado = db.session.execute(db.text(f'SELECT * FROM "{tabla}"'))
+        filas = [dict(row._mapping) for row in resultado]
+        
+        tablas_completas[tabla] = {
+            "columnas": columnas,
+            "total": len(filas),
+            "registros": filas
+        }
+
+    return jsonify({
+        "motor": "SQLite",
+        "archivo": "instance/datos.db",
+        "total_tablas": len(tablas_nombres),
+        "tablas": tablas_completas
+    }), 200
+
+
+if __name__ == '__main__':
+    app.run(port=3000, debug=True)

@@ -1,12 +1,10 @@
-# Entornos virtuales
+﻿venv/
 .venv/
-venv/
-env/
-
-# Archivos cacheados de Python
 __pycache__/
 *.pyc
-
-# Base de datos local (opcional, pero recomendado)
-instance/
-*.db
+node_modules/
+cypress_output.txt
+resultado.txt
+.mypy_cache/
+.idea/
+.DS_Store
